@@ -27,4 +27,4 @@ run cpanm -n Net::SSLeay IO::Socket::SSL
 run --mount=type=bind,source=cpanfile,target=cpanfile cpanm --installdeps . || { cat /root/.cpanm/work/*/build.log; false; }
 copy notify-irc .
 
-entrypoint ["perl", "notify-irc"]
+entrypoint ["perl", "/app/notify-irc"]
