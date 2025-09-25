@@ -1,0 +1,37 @@
+name: 'Notify IRC'
+description: 'Send a notification message to an IRC channel'
+author: 'mauke'
+inputs:
+  server:
+    description: 'IRC server'
+    required: true
+  port:
+    description: 'IRC server port'
+    required: true
+  password:
+    description: 'IRC server password'
+    required: false
+  channel:
+    description: 'IRC channel to message'
+    required: true
+  channel_key:
+    description: 'IRC channel password'
+    required: false
+  join:
+    description: 'Whether to join the channel before sending'
+    default: false
+  nickname:
+    description: 'IRC user nickname'
+    required: true
+  message:
+    description: 'Message to send'
+    required: true
+  notice:
+    description: 'Use NOTICE instead of PRIVMSG'
+    default: false
+  tls:
+    description: 'Whether to connect to the server over TLS'
+    default: false
+runs:
+  using: 'docker'
+  image: 'Dockerfile'

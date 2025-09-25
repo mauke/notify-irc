@@ -1,0 +1,112 @@
+#!perl
+use v5.36;
+use Getopt::Long qw(:config gnu_getopt);
+use Future::AsyncAwait;
+
+our $VERSION = '0.01';
+
+package NotifyIRC {
+    use mro 'c3';
+    use IO::Async::Loop ();
+    use IO::Async::SSL ();
+    use parent qw(Net::Async::IRC);
+
+    sub new_future {
+        my $self = shift;
+        $self->loop->new_future(@_)
+    }
+}
+
+my %param;
+{
+    my @param_spec = qw(
+        *channel
+        channel_key
+        join?
+        password
+        *message
+        *nickname
+        notice?
+        *port
+        *server
+        tls?
+    );
+
+    my (@getopt_spec, @required);
+
+    for my $param (@param_spec) {
+        my $required = $param =~ s/^\*//;
+        my $bool = $param =~ s/\?\z//;
+
+        push @getopt_spec, $param . ($bool ? '!' : '=s');
+
+        push @required, $param if $required;
+
+        if (defined(my $val = $ENV{"INPUT_\U$param"})) {
+            $val = $val ne '0' && $val ne 'false'
+                if $bool;
+            $param{$param} = $val;
+        }
+    }
+
+    GetOptions(\%param, @getopt_spec)
+        or exit 1;
+
+    for my $req (@required) {
+        defined $param{$req}
+            or die "$0: required parameter $req is not set\n";
+    }
+}
+
+my $loop = IO::Async::Loop->new;
+
+my $nick = $param{nickname};
+
+my $irc = NotifyIRC->new(
+    nick     => $nick,
+    user     => 'notify-irc',
+    realname => "notify-irc/$VERSION",
+
+    on_message_ERR_NICKNAMEINUSE => sub {
+        my $self = shift;
+        $nick =~ s{_\K(\d+)\z}{ $1 + 1 }ae
+            or $nick =~ s/_\z/_0/
+            or $nick .= '_';
+        $self->change_nick($nick);
+    },
+
+    on_closed => sub {
+        my $self = shift;
+        $self->loop->stop;
+    },
+);
+
+$loop->add($irc);
+
+await $irc->login(
+    host    => $param{server},
+    service => $param{port},
+    defined $param{password} ? (
+        pass => $param{password},
+    ) : (),
+    $param{tls} ? (
+        extensions      => ['SSL'],
+        SSL_verify_mode => 0,
+    ) : (),
+);
+
+if ($param{join}) {
+    await $irc->send_message('join', undef, $param{channel}, $param{channel_key} // ());
+    await $irc->next_gate_future('join', $param{channel});
+}
+
+my $proclaim = $param{notice} ? 'do_NOTICE' : 'do_PRIVMSG';
+await $irc->$proclaim(target => $param{channel}, text => $param{message});
+
+if ($param{join}) {
+    await $irc->send_message('part', undef, $param{channel});
+}
+
+await $irc->send_message('quit', undef, 'bye');
+
+$loop->run;
