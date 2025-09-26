@@ -1,20 +1,78 @@
 #!perl
 use v5.36;
+use Carp qw(croak);
 use Getopt::Long qw(:config gnu_getopt);
-use Future::AsyncAwait;
+use IO::Socket::IP qw(SOCK_STREAM $CRLF);
 
-our $VERSION = '0.01';
+use constant {
+    RPL_WELCOME           => '001',
+    RPL_ENDOFMOTD         => '376',
+    ERR_NOSUCHCHANNEL     => '403',
+    ERR_TOOMANYCHANNELS   => '405',
+    ERR_NOMOTD            => '422',
+    ERR_ERRONEOUSNICKNAME => '432',
+    ERR_NICKNAMEINUSE     => '433',
+    ERR_NEEDMOREPARAMS    => '461',
+    ERR_CHANNELISFULL     => '471',
+    ERR_INVITEONLYCHAN    => '473',
+    ERR_BANNEDFROMCHAN    => '474',
+    ERR_BADCHANNELKEY     => '475',
+    ERR_BADCHANMASK       => '476',
+};
 
-package NotifyIRC {
-    use mro 'c3';
-    use IO::Async::Loop ();
-    use IO::Async::SSL ();
-    use parent qw(Net::Async::IRC);
+our $VERSION = '0.02';
 
-    sub new_future {
-        my $self = shift;
-        $self->loop->new_future(@_)
+my $Chatty;
+
+sub parse_irc($line) {
+    $line =~ s/$CRLF\z//;
+    say STDERR "<<< $line" if $Chatty;
+    my ($prefix, $cmd, $middle, $last) = $line =~ m{
+        \A
+        (?: : ( [^ ]+ ) [ ]+ )?
+        ( [^: ] [^ ]* )
+        (?: [ ]+ [^: ] [^ ]* )*
+        (?: [ ]+ : (.*) | [ ]* )
+        \z
+    }x or die "Can't parse IRC message: $line";
+    +{
+        prefix => $prefix,
+        cmd    => $cmd,
+        args   => [split(/ +/, $middle // ''), $last // ()],
     }
+}
+
+sub format_irc($cmd, @args) {
+    my $prefix;
+    if ($cmd =~ /^:/) {
+        $prefix = $cmd;
+        $cmd = shift @args;
+    }
+    defined $cmd
+        or croak "Missing command name";
+    $cmd = uc $cmd;
+    grep /[$CRLF]/, $prefix // (), $cmd, @args
+        and croak "IRC messages cannot contain CR/LF";
+    my $final = pop @args;
+    grep / /, $prefix // (), $cmd, @args
+        and croak "IRC commands and non-final arguments cannot contain spaces";
+    my $msg =
+        (defined $prefix ? $prefix . ' ' : '')
+        . $cmd
+        . join('', map " $_", @args)
+        . (defined $final ? " :$final" : '');
+    utf8::downgrade $msg;
+    length $msg > 510
+        and croak "IRC messages cannot exceed 512 bytes";
+    say STDERR ">>> $msg" if $Chatty;
+    $msg . $CRLF
+}
+
+sub nick_bump($nick) {
+    $nick =~ s/_\K(\d+)\z/$1 + 1/ae
+        or $nick =~ s/_\z/_0/
+        or $nick .= '_';
+    $nick
 }
 
 my %param;
@@ -30,6 +88,7 @@ my %param;
         *port
         *server
         tls?
+        verbose?
     );
 
     my (@getopt_spec, @required);
@@ -58,55 +117,84 @@ my %param;
     }
 }
 
-my $loop = IO::Async::Loop->new;
+$Chatty = $param{verbose};
+
+my $sock = IO::Socket::IP->new(
+    PeerHost    => $param{server},
+    PeerService => $param{port},
+    Type        => SOCK_STREAM,
+) or die "$0: Can't connect to $param{server} on $param{port}: $@\n";
 
 my $nick = $param{nickname};
 
-my $irc = NotifyIRC->new(
-    nick     => $nick,
-    user     => 'notify-irc',
-    realname => "notify-irc/$VERSION",
+print $sock format_irc 'PASS', $param{password}
+    if defined $param{password};
+print $sock format_irc 'NICK', $nick;
+print $sock format_irc 'USER', 'notify-irc', '*', '*', "notify-irc/$VERSION";
 
-    on_message_ERR_NICKNAMEINUSE => sub {
-        my $self = shift;
-        $nick =~ s{_\K(\d+)\z}{ $1 + 1 }ae
-            or $nick =~ s/_\z/_0/
-            or $nick .= '_';
-        $self->change_nick($nick);
-    },
+# here for a good time
+$SIG{ALRM} = sub {
+    print STDERR "$0: Timed out\n";
+    exit 142;
+};
+alarm 120;
 
-    on_closed => sub {
-        my $self = shift;
-        $self->loop->stop;
-    },
-);
-
-$loop->add($irc);
-
-await $irc->login(
-    host    => $param{server},
-    service => $param{port},
-    defined $param{password} ? (
-        pass => $param{password},
-    ) : (),
-    $param{tls} ? (
-        extensions      => ['SSL'],
-        SSL_verify_mode => 0,
-    ) : (),
-);
-
-if ($param{join}) {
-    await $irc->send_message('join', undef, $param{channel}, $param{channel_key} // ());
-    await $irc->next_gate_future('join', $param{channel});
+while (my $line = readline $sock) {
+    my $msg = parse_irc $line;
+    if ($msg->{cmd} eq 'PING') {
+        print $sock format_irc 'PONG', $msg->{args}->@*;
+    } elsif ($msg->{cmd} eq ERR_NICKNAMEINUSE) {
+        $nick = nick_bump $nick;
+        print $sock format_irc 'NICK', $nick;
+    } elsif ($msg->{cmd} eq ERR_ERRONEOUSNICKNAME) {
+        $nick = 'notifybot';
+        print $sock format_irc 'NICK', $nick;
+    } elsif (
+        $msg->{cmd} eq RPL_WELCOME ||
+        $msg->{cmd} eq RPL_ENDOFMOTD ||
+        $msg->{cmd} eq ERR_NOMOTD
+    ) {
+        last;
+    }
 }
 
-my $proclaim = $param{notice} ? 'do_NOTICE' : 'do_PRIVMSG';
-await $irc->$proclaim(target => $param{channel}, text => $param{message});
-
 if ($param{join}) {
-    await $irc->send_message('part', undef, $param{channel});
+    print $sock format_irc 'JOIN', $param{channel}, $param{channel_key} // ();
+    while (my $line = readline $sock) {
+        my $msg = parse_irc $line;
+        if ($msg->{cmd} eq 'PING') {
+            print $sock format_irc 'PONG', $msg->{args}->@*;
+        } elsif ($msg->{cmd} eq 'JOIN' && defined $msg->{prefix}) {
+            # probably us
+            last;
+        } elsif (
+            $msg->{cmd} eq ERR_NEEDMOREPARAMS ||
+            $msg->{cmd} eq ERR_BANNEDFROMCHAN ||
+            $msg->{cmd} eq ERR_INVITEONLYCHAN ||
+            $msg->{cmd} eq ERR_BADCHANNELKEY ||
+            $msg->{cmd} eq ERR_CHANNELISFULL ||
+            $msg->{cmd} eq ERR_BADCHANMASK ||
+            $msg->{cmd} eq ERR_NOSUCHCHANNEL ||
+            $msg->{cmd} eq ERR_TOOMANYCHANNELS
+        ) {
+            die "Can't join $param{channel}: $msg->{cmd}";
+        }
+    }
 }
 
-await $irc->send_message('quit', undef, 'bye');
+print $sock format_irc $param{notice} ? 'NOTICE' : 'PRIVMSG', $param{channel}, $param{message};
 
-$loop->run;
+if ($param{join}) {
+    print $sock format_irc 'PART', $param{channel};
+}
+
+print $sock format_irc 'QUIT', 'bye';
+
+while (my $line = readline $sock) {
+    my $msg = parse_irc $line;
+    if ($msg->{cmd} eq 'PING') {
+        print $sock format_irc 'PONG', $msg->{args}->@*;
+    }
+}
+
+close $sock;
