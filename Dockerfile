@@ -1,6 +1,6 @@
 from perl:5.42-slim
 
-workdir /app
+workdir /usr/src/app
 copy notify-irc .
 
-entrypoint ["perl", "/app/notify-irc"]
+entrypoint ["/usr/local/bin/perl", "/usr/src/app/notify-irc"]
