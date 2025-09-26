@@ -18,7 +18,7 @@ inputs:
     description: 'IRC channel password'
     required: false
   join:
-    description: 'Whether to join the channel before sending'
+    description: 'Whether to join the channel before sending (needed if channel is +n)'
     default: false
   nickname:
     description: 'IRC user nickname'
@@ -31,6 +31,9 @@ inputs:
     default: false
   tls:
     description: 'Whether to connect to the server over TLS'
+    default: false
+  verbose:
+    description: 'Log all sent/received messages'
     default: false
 runs:
   using: 'docker'
