@@ -3,6 +3,7 @@ use v5.36;
 use Carp qw(croak);
 use Getopt::Long qw(:config gnu_getopt);
 use IO::Socket::IP qw(SOCK_STREAM $CRLF);
+use IO::Socket::SSL qw($SSL_ERROR SSL_VERIFY_NONE);
 
 use constant {
     RPL_WELCOME           => '001',
@@ -119,10 +120,13 @@ my %param;
 
 $Chatty = $param{verbose};
 
-my $sock = IO::Socket::IP->new(
+my $sock = IO::Socket::SSL->new(
     PeerHost    => $param{server},
     PeerService => $param{port},
     Type        => SOCK_STREAM,
+
+    SSL_startHandshake => $param{tls} ? 1 : 0,
+    SSL_verify_mode => SSL_VERIFY_NONE,
 ) or die "$0: Can't connect to $param{server} on $param{port}: $@\n";
 
 my $nick = $param{nickname};
@@ -182,7 +186,9 @@ if ($param{join}) {
     }
 }
 
-print $sock format_irc $param{notice} ? 'NOTICE' : 'PRIVMSG', $param{channel}, $param{message};
+print $sock format_irc $param{notice} ? 'NOTICE' : 'PRIVMSG', $param{channel}, $_
+    for map /.{1,400}/g,
+        split /\R/, $param{message};
 
 if ($param{join}) {
     print $sock format_irc 'PART', $param{channel};
@@ -197,4 +203,4 @@ while (my $line = readline $sock) {
     }
 }
 
-close $sock;
+$sock->close(SSL_fast_shutdown => 0);
