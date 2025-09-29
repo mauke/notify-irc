@@ -134,7 +134,7 @@ my $nick = $param{nickname};
 print $sock format_irc 'PASS', $param{password}
     if defined $param{password};
 print $sock format_irc 'NICK', $nick;
-print $sock format_irc 'USER', 'notify-irc', '*', '*', "notify-irc/$VERSION";
+print $sock format_irc 'USER', 'notifyirc', '*', '*', "notify-irc/$VERSION";
 
 # here for a good time
 $SIG{ALRM} = sub {
