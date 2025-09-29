@@ -103,7 +103,7 @@ my %param;
         push @required, $param if $required;
 
         if (defined(my $val = $ENV{"INPUT_\U$param"})) {
-            $val = $val ne '0' && $val ne 'false'
+            $val = $val ne '' && $val ne '0' && $val ne 'false'
                 if $bool;
             $param{$param} = $val;
         }
